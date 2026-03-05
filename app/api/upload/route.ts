@@ -1,13 +1,12 @@
-// app/api/upload/route.ts
 import { NextResponse } from 'next/server';
 import pool from '../../../lib/mysql';
 import fs from 'fs/promises';
 import path from 'path';
+import { authMiddleware } from '../../../lib/middleware';
 
 export const dynamic = 'force-dynamic';
 const uploadDir = path.join(process.cwd(), 'public', 'uploads');
 
-// Đảm bảo thư mục tồn tại
 async function ensureUploadDir() {
   try {
     await fs.mkdir(uploadDir, { recursive: true });
@@ -19,10 +18,11 @@ async function ensureUploadDir() {
 export async function POST(request: Request) {
   let connection;
   try {
-    // 1. Đảm bảo thư mục tồn tại
-    await ensureUploadDir();
+    const authResult = await authMiddleware(request as any);
+    if (authResult) return authResult;
+    const user = (request as any).user;
 
-    // 2. Parse form data
+    await ensureUploadDir();
     const formData = await request.formData();
     const file = formData.get('file') as File | null;
     const number = (formData.get('number') as string | null)?.trim();
@@ -30,13 +30,10 @@ export async function POST(request: Request) {
     const name = (formData.get('name') as string | null)?.trim();
     const issuedDate = formData.get('issued_date') as string | null;
 
-    // 3. Validate
-    if (!file) return NextResponse.json({ error: 'Thiếu file' }, { status: 400 });
-    if (!number || !type || !name) {
+    if (!file || !number || !type || !name) {
       return NextResponse.json({ error: 'Thiếu thông tin bắt buộc' }, { status: 400 });
     }
 
-    // 4. Validate ngày
     let finalIssuedDate: string | null = null;
     if (issuedDate) {
       const date = new Date(issuedDate);
@@ -46,7 +43,6 @@ export async function POST(request: Request) {
       finalIssuedDate = date.toISOString().split('T')[0];
     }
 
-    // 5. Lưu file
     const safeFileName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
     const filePath = `/uploads/${safeFileName}`;
     const buffer = Buffer.from(await file.arrayBuffer());
@@ -54,13 +50,12 @@ export async function POST(request: Request) {
 
     await fs.writeFile(fullPath, buffer);
 
-    // 6. Lưu DB
     connection = await pool.getConnection();
     const [result] = await connection.query(
       `INSERT INTO documents 
-       (number, type, name, file_path, issued_date, file_size, file_name_original) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [number, type, name, filePath, finalIssuedDate, file.size, file.name]
+       (number, type, name, file_path, issued_date, file_size, file_name_original, user_id, sender_id) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [number, type, name, filePath, finalIssuedDate, file.size, file.name, user.id, user.id]
     );
 
     return NextResponse.json({
@@ -68,13 +63,9 @@ export async function POST(request: Request) {
       id: (result as any).insertId,
       file_path: filePath
     });
-
   } catch (error: any) {
     console.error('Upload error:', error);
-    return NextResponse.json(
-      { error: 'Lỗi server', details: error.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Lỗi server', details: error.message }, { status: 500 });
   } finally {
     if (connection) connection.release();
   }
